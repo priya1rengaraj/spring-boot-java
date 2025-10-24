@@ -1,0 +1,146 @@
+# Maven
+# Build your Java project and run tests with Apache Maven.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/java
+
+trigger:
+- master
+
+pool:
+  vmImage: ubuntu-latest
+
+resources:
+  repositories:
+    - repository: myGitHubRepo
+      type: github
+      name: priya1rengaraj/spring-boot-java
+      endpoint: priya1rengaraj  
+
+steps:
+- script: java -version
+  displayName: 'Check Java Version'      
+
+- script: mvn -version
+  displayName: 'Check Maven Version' 
+
+- checkout: myGitHubRepo  
+
+- script: pwd
+  displayName: 'Show Working Directory'
+
+- script: |
+    echo "Listing current directory contents:"
+    ls -la
+  displayName: 'List Files in Working Directory'
+
+- script: mvn clean install
+  workingDirectory: $(System.DefaultWorkingDirectory)  # points to repo root
+  displayName: 'Run mvn clean install'  
+
+- script: |
+    echo "Listing JAR files in target folder:"
+    ls -la $(System.DefaultWorkingDirectory)/target
+  displayName: 'Check JAR in target folder'  
+
+#- script: ls -la $(System.DefaultWorkingDirectory)/target/*.jar   (in future use this instead of previous)
+#  displayName: 'Show JAR files only'
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: '$(System.DefaultWorkingDirectory)/target'
+    artifact: 'jar-build'
+  displayName: 'Publish JAR as Pipeline Artifact'
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'AzureBlobConnection'   # Your service connection
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo "Uploading JAR to Azure Blob Storage with Build No and Timestamp..."
+
+      AZ_STORAGE_ACCOUNT="codeinfrapipelinestoacc"      # Your storage account
+      CONTAINER_NAME="pipeline-container"           # Your blob container
+      JAR_FILE=$(System.DefaultWorkingDirectory)/target/commons-0.0.1-SNAPSHOT.jar
+      TIMESTAMP=$(date +%Y%m%d%H%M%S)
+      BLOB_NAME="$(basename $JAR_FILE)-$(Build.BuildNumber)-$(date +%Y%m%d%H%M%S).jar"
+
+
+      az storage blob upload \
+        --account-name $AZ_STORAGE_ACCOUNT \
+        --container-name $CONTAINER_NAME \
+        --name $BLOB_NAME \
+        --file $JAR_FILE \
+        --overwrite true
+  displayName: 'Upload JAR to Blob Storage'  
+
+- script: docker --version
+  displayName: 'Check Docker Version' 
+
+- script: pwd
+  displayName: 'Show Working Directory'
+
+- script: |
+    echo "Listing current directory contents:"
+    ls -la
+  displayName: 'List Files in Working Directory'  
+
+- script: |
+    echo "Building Docker image..."
+    docker build -t springboot-app:v1 .
+  workingDirectory: $(System.DefaultWorkingDirectory)
+  displayName: 'Build Docker Image'  
+
+- script: |
+    echo "Listing docker images"
+    docker images
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'AzureBlobConnection'   # Your Azure service connection (same as before)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      # --- Set your ACR and image details ---
+      ACR_NAME="acr1for1pipeline"                 # Replace with your actual ACR name
+      LOCAL_IMAGE="springboot-app:v1"    # The image you already built
+      IMAGE_NAME="springboot-app"
+      IMAGE_TAG="v1"                     # Keep same or use $(Build.BuildNumber) if you want versioning
+
+      echo "Logging in to Azure Container Registry..."
+      az acr login --name $ACR_NAME
+
+      echo "Tagging local image for ACR..."
+      docker tag $LOCAL_IMAGE $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG
+
+      echo "Pushing image to ACR..."
+      docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG
+
+      echo "✅ Successfully pushed image to ACR: $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
+  displayName: 'Push Docker Image to ACR'
+
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'AzureBlobConnection'   # Your Azure DevOps service connection
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo "Setting variables..."
+      AKS_CLUSTER="akscluster"
+      AKS_RG="code-infra-pipeline-rg"
+      ACR_NAME="acr1for1pipeline"
+      IMAGE_NAME="springboot-app"
+      IMAGE_TAG="v1"
+
+      echo "Getting AKS credentials..."
+      az aks get-credentials --resource-group $AKS_RG --name $AKS_CLUSTER --overwrite-existing
+
+      echo "Deploying to AKS..."
+      kubectl apply -f manifests/deployment.yaml
+      kubectl apply -f manifests/service.yaml
+
+      echo "Verifying deployment..."
+      kubectl get pods -o wide
+      kubectl get svc -o wide
+  displayName: 'Deploy to AKS via kubectl'
